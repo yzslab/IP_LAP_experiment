@@ -344,6 +344,7 @@ lip_dist_idx = np.asarray([idx for idx, dist in dists_sorted])  #the frame idxs 
 
 Nl_idxs = [lip_dist_idx[int(i)] for i in torch.linspace(0, input_vid_len - 1, steps=Nl)]
 Nl_pose_landmarks, Nl_content_landmarks = [], []  #Nl_pose + Nl_content=Nl reference landmarks
+print("Nl_idxs={}".format(Nl_idxs))
 for reference_idx in Nl_idxs:
     frame_pose_landmarks = all_pose_landmarks[reference_idx]
     frame_content_landmarks = all_content_landmarks[reference_idx]
