@@ -400,7 +400,7 @@ def main():
                 Nl_content = Nl_content.cuda()  # (1, Nl, 2, 57)
                 T_pose = T_pose.cuda()  # (1, T, 2, 74)
                 T_content = T_content.cuda()  # (1, T, 2, 57)
-                T_mels = T_mels.cuda()  # (1, T, 1, 80, mel_step_size)
+                T_mels = T_mels.cuda()  # (1, T, 1, 80, mel_step_size=16)
 
                 # infer
                 predict_content = model(T_mels, T_pose, Nl_pose, Nl_content)  # (1*T, 2, 57)
