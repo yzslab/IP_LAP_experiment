@@ -9,6 +9,7 @@ import face_alignment
 from models import audio
 from draw_landmark import draw_landmarks
 import mediapipe as mp
+from glob import glob
 parser = argparse.ArgumentParser()
 parser.add_argument('--input', '--input_template_video', type=str, default='./test/template_video/129.mp4')
 #'./test/template_video/129.mp4'
@@ -20,6 +21,7 @@ parser.add_argument('--output_dir', type=str, default='./test_result')
 parser.add_argument('--static', type=bool, help='whether only use  the first frame for inference', default=False)
 parser.add_argument('--landmark_gen_checkpoint_path', type=str, default='./test/checkpoints/landmarkgenerator_checkpoint.pth')
 parser.add_argument('--renderer_checkpoint_path', type=str, default='./test/checkpoints/renderer_checkpoint.pth')
+parser.add_argument('--n-padding-pixels', type=int, default=25)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 args = parser.parse_args()
 
@@ -36,9 +38,7 @@ lip_index = [0, 17]  # the index of the midpoints of the upper lip and lower lip
 landmark_gen_checkpoint_path = args.landmark_gen_checkpoint_path
 renderer_checkpoint_path =args.renderer_checkpoint_path
 output_dir = args.output_dir
-temp_dir = 'tempfile_of_{}'.format(output_dir.split('/')[-1])
 os.makedirs(output_dir, exist_ok=True)
-os.makedirs(temp_dir, exist_ok=True)
 input_video_path = args.input
 input_audio_path = args.audio
 
@@ -117,8 +117,16 @@ content_landmark_idx = all_landmarks_idx - pose_landmark_idx
 if os.path.isfile(input_video_path) and input_video_path.split('.')[1] in ['jpg', 'png', 'jpeg']:
     args.static = True
 
-outfile_path = os.path.join(output_dir,
-                       '{}_N_{}_Nl_{}.mp4'.format(input_video_path.split('/')[-1][:-4] + 'result', ref_img_N, Nl))
+base_filename = 'V_{}-A_{}-N_{}-Nl_{}.mp4'.format(os.path.basename(input_video_path), os.path.basename(args.audio), ref_img_N, Nl)
+
+outfile_path = os.path.join(output_dir, base_filename)
+outlandmark_path = os.path.join(output_dir, '{}.landmarks'.format(base_filename))
+os.makedirs(outlandmark_path, exist_ok=True)
+for i in glob(os.path.join(outlandmark_path, "*.jpg")):
+    os.unlink(i)
+temp_dir = os.path.join(output_dir, '{}.tmp'.format(base_filename))
+os.makedirs(temp_dir, exist_ok=True)
+
 if os.path.isfile(input_video_path) and input_video_path.split('.')[1] in ['jpg', 'png', 'jpeg']:
     args.static = True
 
@@ -281,7 +289,7 @@ with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landm
                     y_max = landmark.y
         ##########plus some pixel to the marginal region##########
         #note:the landmarks coordinates returned by mediapipe range 0~1
-        plus_pixel = 25
+        plus_pixel = args.n_padding_pixels
         x_min = max(x_min - plus_pixel / w, 0)
         x_max = min(x_max + plus_pixel / w, 1)
 
@@ -473,6 +481,8 @@ for batch_idx, batch_start_idx in tqdm(enumerate(range(0, input_mel_chunks_len -
     T_predict_full_landmarks = torch.cat([T_pose, predict_content], dim=2).cpu().numpy()  # (1*T,2,131)
 
     #1.draw target sketch
+    T_target_sketches_without_resize = []
+    T_target_sketches_resized = []
     T_target_sketches = []
     for frame_idx in range(T):
         full_landmarks = T_predict_full_landmarks[frame_idx]  # (2,131)
@@ -483,10 +493,13 @@ for batch_idx, batch_start_idx in tqdm(enumerate(range(0, input_mel_chunks_len -
                                       range(full_landmarks.shape[1])]
         drawn_sketech = draw_landmarks(drawn_sketech, mediapipe_format_landmarks, connections=FACEMESH_CONNECTION,
                                        connection_drawing_spec=drawing_spec)
+        cv2.imwrite(os.path.join(outlandmark_path, "{:06d}_{:d}.jpg".format(batch_idx, frame_idx)), drawn_sketech)
         drawn_sketech = cv2.resize(drawn_sketech, (img_size, img_size))  # (128, 128, 3)
+        T_target_sketches_resized.append(drawn_sketech)
         if frame_idx == 2:
             show_sketch = cv2.resize(drawn_sketech, (frame_w, frame_h)).astype(np.uint8)
         T_target_sketches.append(torch.FloatTensor(drawn_sketech) / 255)
+    cv2.imwrite(os.path.join(outlandmark_path, "{:06d}_resized.jpg".format(batch_idx)), np.concatenate(T_target_sketches_resized, axis=1))
     T_target_sketches = torch.stack(T_target_sketches, dim=0).permute(0, 3, 1, 2)  # (T,3,128, 128)
     target_sketches = T_target_sketches.unsqueeze(0).cuda()  # (1,T,3,128, 128)
 
