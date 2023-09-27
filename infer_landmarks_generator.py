@@ -43,7 +43,7 @@ def extract_audio_from_video(video_filename: str, output_path: str):
 
 
 # define functions
-def extract_landmark_from_video(video_filename: str) -> Tuple[List, List, List, List, List]:
+def extract_landmark_from_video(video_filename: str, padding_pixels: int) -> Tuple[List, List, List, List, List]:
     # read video frames
     video_stream = cv2.VideoCapture(video_filename)
     assert video_stream.get(cv2.CAP_PROP_FPS) == 25.
@@ -107,11 +107,11 @@ def extract_landmark_from_video(video_filename: str) -> Tuple[List, List, List, 
                 if idx in content_landmark_idx:
                     content_landmarks.append((idx, landmark.x, landmark.y))
             ##########plus 5 pixel to size##########
-            x_min = max(x_min - 5 / w, 0)
-            x_max = min(x_max + 5 / w, 1)
+            x_min = max(x_min - padding_pixels / w, 0)
+            x_max = min(x_max + padding_pixels / w, 1)
             #
-            y_min = max(y_min - 5 / h, 0)
-            y_max = min(y_max + 5 / h, 1)
+            y_min = max(y_min - padding_pixels / h, 0)
+            y_max = min(y_max + padding_pixels / h, 1)
             face_frame = cv2.resize(full_frame[int(y_min * h):int(y_max * h), int(x_min * w):int(x_max * w)],
                                     (128, 128))
 
@@ -174,7 +174,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--experiment-name", "-n", type=str, default=None)
     parser.add_argument("--smooth", action="store_true", default=False)
-    parser.add_argument("--chunk-mel", action="store_true", default=False)
+    parser.add_argument("--padding", type=int, default=5)
+    # parser.add_argument("--chunk-mel", action="store_true", default=False)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -200,7 +201,7 @@ def main():
     face_and_sketch_output_dir = os.path.join(preprocess_output, "face_with_sketch")
     os.makedirs(face_and_sketch_output_dir, exist_ok=True)
 
-    landmark_output_path = os.path.join(preprocess_output, "landmarks")
+    landmark_output_path = os.path.join(preprocess_output, "landmarks-pp_{}".format(args.padding))
 
     # extract audio from video if audio path not provided
     if args.input_wav is None:
@@ -215,7 +216,7 @@ def main():
                 f)
     else:
         frame_pose_landmark_list, frame_content_landmark_list, frame_face_list, frame_sketch_list, lip_dist_list = extract_landmark_from_video(
-            args.input_video)
+            args.input_video, padding_pixels=args.padding)
         with tqdm(range(len(frame_face_list)), desc="saving frame landmarks") as t:
             for i in t:
                 cv2.imwrite(
@@ -250,19 +251,19 @@ def main():
     # get Mel Spectrogram from audio
     print("extracting mel spectrogram from wav")
     mel = get_mel_spectrogram_from_file(args.input_wav, AUDIO_SAMPLE_RATE)
-    mel_chunks = None
-    if args.chunk_mel is True:
-        print("mel chunk")
-        mel_chunks = []  # each mel chunk correspond to 5 video frames, used to generate one video frame
-        mel_idx_multiplier = 80. / fps
-        mel_chunk_idx = 0
-        mel = mel.T
-        while 1:
-            start_idx = int(mel_chunk_idx * mel_idx_multiplier)
-            if start_idx + mel_step_size > len(mel[0]):
-                break
-            mel_chunks.append(mel[:, start_idx: start_idx + mel_step_size])  # mel for generate one video frame
-            mel_chunk_idx += 1
+    # mel_chunks = None
+    # if args.chunk_mel is True:
+    print("mel chunk")
+    mel_chunks = []  # each mel chunk correspond to 5 video frames, used to generate one video frame
+    mel_idx_multiplier = 80. / fps
+    mel_chunk_idx = 0
+    mel = mel.T
+    while 1:
+        start_idx = int(mel_chunk_idx * mel_idx_multiplier)
+        if start_idx + mel_step_size > len(mel[0]):
+            break
+        mel_chunks.append(mel[:, start_idx: start_idx + mel_step_size])  # mel for generate one video frame
+        mel_chunk_idx += 1
 
     # randomly select N_l reference landmarks for landmark transformer
     ## select Nl frames
@@ -327,30 +328,38 @@ def main():
         experiment_name = args.experiment_name
         if experiment_name is None:
             experiment_name = args.input_wav.replace("/", "_")
-        output_dir = os.path.join(
+        base_output_dir = os.path.join(
             preprocess_output,
             "experiments",
             experiment_name,
             str(int(time.time()))
         )
-        os.makedirs(output_dir)
+
+        predicted_T_landmark_output_dir = os.path.join(base_output_dir, "predicted_T_landmarks")
+        os.makedirs(predicted_T_landmark_output_dir)
+        predicted_frame_landmark_output_dir = os.path.join(base_output_dir, "predicted_frame_landmarks")
+        os.makedirs(predicted_frame_landmark_output_dir)
 
         loss_fn = torch.nn.L1Loss()
 
-        with tqdm(enumerate(range(0, video_frame_count, 5)), desc="predicting landmarks") as t, open(
-                os.path.join(output_dir, "metrics.txt"), "w") as metric:
+        # with tqdm(enumerate(range(0, video_frame_count - 5)), desc="predicting landmarks") as t, open(
+        #         os.path.join(output_dir, "metrics.txt"), "w") as metric:
+        with tqdm(enumerate(range(0, len(mel_chunks) - 2)), desc="predicting landmarks", total=len(mel_chunks) - 2) as t, open(
+                os.path.join(predicted_T_landmark_output_dir, "metrics.txt"), "w") as metric:
             for batch_idx, i in t:
+                # select 5 frames from current frame (include current frame)
                 T_idxs = list(range(i, i + T))
-                if T_idxs[-1] >= video_frame_count:
-                    break
-                t.set_description("predicting frames {}".format(T_idxs))
+                T_idxs = [i % video_frame_count for i in T_idxs]  # make sure not overflow
+                # if T_idxs[-1] >= video_frame_count:
+                #     break
+                t.set_description("predicting frame #{} with pose landmarks from frames #{}".format(batch_idx, T_idxs))
 
-                # get landmarks
+                # get landmarks of T frames
                 T_pose_landmarks, T_content_landmarks = [], []
                 for frame_idx in T_idxs:
                     T_pose_landmarks.append(frame_pose_landmark_list[frame_idx])
                     T_content_landmarks.append(frame_content_landmark_list[frame_idx])
-                # build landmark as tensor
+                # build landmarks as tensor
                 T_pose = torch.zeros((T, 2, 74))  # 74 landmark
                 T_content = torch.zeros((T, 2, 57))  # 57 landmark
                 for idx in range(T):
@@ -373,24 +382,24 @@ def main():
 
                 # get mel
                 T_mels = []
-                if args.chunk_mel is False:
-                    for frame_idx in T_idxs:
-                        mel_start_frame_idx = frame_idx - 2  ###around the frame
-                        if mel_start_frame_idx < 0:
-                            mel_start_frame_idx = 0
-                        start_idx = int(80. * (mel_start_frame_idx / float(fps)))
-                        m = mel[start_idx: start_idx + mel_step_size, :]  # get five frames around
-                        if m.shape[0] != mel_step_size:  # in the end of vid
-                            break
-                        T_mels.append(m.T)  # transpose
-
-                    if len(T_mels) != T:
-                        break
-                else:
-                    for mel_chunk_idx in T_idxs:
-                        T_mels.append(mel_chunks[max(0, mel_chunk_idx - 2)])
-                    if len(T_mels) != T:
-                        break
+                # if args.chunk_mel is False:
+                #     for frame_idx in T_idxs:
+                #         mel_start_frame_idx = frame_idx - 2  ###around the frame
+                #         if mel_start_frame_idx < 0:
+                #             mel_start_frame_idx = 0
+                #         start_idx = int(80. * (mel_start_frame_idx / float(fps)))
+                #         m = mel[start_idx: start_idx + mel_step_size, :]  # get five frames around
+                #         if m.shape[0] != mel_step_size:  # in the end of vid
+                #             break
+                #         T_mels.append(m.T)  # transpose
+                #
+                #     if len(T_mels) != T:
+                #         break
+                # else:
+                for mel_chunk_idx in T_idxs:
+                    T_mels.append(mel_chunks[max(0, mel_chunk_idx - 2)])
+                # if len(T_mels) != T:
+                #     break
 
                 T_mels = np.asarray(T_mels)  # (T,hv,wv)
                 T_mels = torch.FloatTensor(T_mels).unsqueeze(1)  # (T,1,hv,wv)
@@ -410,36 +419,44 @@ def main():
                 metric.write("{:06d}-{:06d}: {}\n".format(T_idxs[0], T_idxs[-1], loss))
                 T_pose = T_pose.squeeze(0).cpu().numpy()
                 predict_content = predict_content.cpu().numpy()
+
+                T_face_list = []
+                T_sketch_list = []
+                predict_sketch_list = []
                 for idx, i in enumerate(T_idxs):
-                    predict_sketch = draw_pose_and_content(T_pose[idx], predict_content[idx])
-                    cv2.imwrite(os.path.join(output_dir, "{:06d}.jpg".format(i)), np.concatenate([
-                        frame_face_list[i],
-                        frame_sketch_list[i],
-                        predict_sketch,
-                    ], axis=1))
+                    T_face_list.append(frame_face_list[i])
+                    T_sketch_list.append(frame_sketch_list[i])
+                    predict_sketch_list.append(draw_pose_and_content(T_pose[idx], predict_content[idx]))
+
+                predict_visualized = np.concatenate([
+                    np.concatenate(T_face_list, axis=1),  # concat T faces
+                    np.concatenate(T_sketch_list, axis=1),  # concat T input frames
+                    np.concatenate(predict_sketch_list, axis=1),  # concat T predicted landmarks
+                ], axis=0)
+                cv2.imwrite(os.path.join(predicted_T_landmark_output_dir, "{:06d}.jpg".format(batch_idx)), predict_visualized)
     assert subprocess.call([
         "ffmpeg",
         "-y",
         "-i",
-        os.path.join(output_dir, "%06d.jpg"),
+        os.path.join(predicted_T_landmark_output_dir, "%06d.jpg"),
         "-vf",
         "pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-c:v",
         "libx264",
         "-pix_fmt",
         "yuv420p",
-        os.path.join(output_dir, "video-without-audio.mp4"),
+        os.path.join(predicted_T_landmark_output_dir, "video-without-audio.mp4"),
     ]) == 0
     assert subprocess.call([
         "ffmpeg",
         "-y",
         "-i",
-        os.path.join(output_dir, "video-without-audio.mp4"),
+        os.path.join(predicted_T_landmark_output_dir, "video-without-audio.mp4"),
         "-i",
         args.input_wav,
-        os.path.join(output_dir, "video.mp4"),
+        os.path.join(predicted_T_landmark_output_dir, "video.mp4"),
     ]) == 0
-    print("infer results saved to {}".format(output_dir))
+    print("infer results saved to {}".format(base_output_dir))
 
 
 main()
